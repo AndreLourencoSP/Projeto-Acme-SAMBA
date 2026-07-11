@@ -1,0 +1,244 @@
+---
+- name: Configurar Samba como Active Directory Domain Controller (DC)
+  hosts: srv_samba
+  become: yes
+  vars_files:
+    - vars_secretas.yml
+
+  vars:
+    # --- CONFIGURAÇÃO DO DOMÍNIO ---
+    domain_name: "acme"
+    domain_realm: "ACME.LOCAL"
+    hostname_dc: "srv-samba" # Nome interno do Linux (Sem "_" para evitar problemas no AD)
+
+  tasks:
+    - name: Atualizar o cache do apt
+      apt:
+        update_cache: yes
+
+    - name: Definir o hostname correto do servidor
+      hostname:
+        name: "{{ hostname_dc }}"
+
+    - name: Garantir que o /etc/hosts possui o FQDN correto
+      lineinfile:
+        path: /etc/hosts
+        line: "127.0.0.1 {{ hostname_dc }}.{{ domain_realm | lower }} {{ hostname_dc }}"
+        regexp: '^127\.0\.0\.1'
+
+    - name: Instalar pacotes necessarios para o Samba AD e Kerberos
+      apt:
+        name:
+          - samba
+          - smbclient
+          - krb5-user
+          - winbind
+          - libpam-winbind
+          - libnss-winbind
+          - ldb-tools
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive # Evita que as telas de configuracao do Kerberos travem o Ansible
+
+    - name: Parar e desativar servicos que entram em conflito com o Samba AD
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - smbd
+        - nmbd
+        - winbind
+        - systemd-resolved # O Samba vai gerenciar o DNS na porta 53.
+
+    - name: Remover arquivo smb.conf original (o provisionamento cria um novo)
+      file:
+        path: /etc/samba/smb.conf
+        state: absent
+
+    - name: Verificar se o dominio ja foi provisionado anteriormente
+      stat:
+        path: /var/lib/samba/private/sam.ldb
+      register: domain_provisioned
+
+    - name: Provisionar o Dominio Active Directory
+      command: >
+        samba-tool domain provision
+        --use-rfc2307
+        --realm={{ domain_realm }}
+        --domain={{ domain_name | upper }}
+        --server-role=dc
+        --dns-backend=SAMBA_INTERNAL
+        --adminpass='{{ admin_password_secreta }}'
+      when: not domain_provisioned.stat.exists
+
+    - name: Configurar o Samba para usar o range de portas RPC restrito (do Security Group)
+      ini_file:
+        path: /etc/samba/smb.conf
+        section: global
+        option: rpc server port
+        value: "1024"
+      notify: Reiniciar Samba AD
+
+    - name: Copiar o arquivo Kerberos gerado pelo Samba para o sistema
+      copy:
+        src: /var/lib/samba/private/krb5.conf
+        dest: /etc/krb5.conf
+        remote_src: yes
+        force: yes
+
+    - name: Ajustar o DNS local para apontar para ele mesmo (Samba AD)
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 127.0.0.1
+          search {{ domain_realm | lower }}
+
+    - name: Garantir que o servico do Samba Active Directory esta rodando e ativo
+      systemd:
+        name: samba-ad-dc
+        state: started
+        enabled: yes
+        masked: no
+
+  handlers:
+    - name: Reiniciar Samba AD
+      systemd:
+        name: samba-ad-dc
+        state: restarted
+
+
+
+
+- name: Configurar Servidor de Arquivos Dedicado e Membro do Domínio
+  hosts: srv_arquivos
+  become: yes
+  vars_files:
+    - vars_secretas.yml
+
+  vars:
+    domain_name: "acme"
+    domain_realm: "ACME.LOCAL"
+    domain_admin: "Administrator"
+    ip_srv_samba: "192.168.5.10"
+    s3_bucket_name: "acme-arquivos-backup-09072026"
+
+  tasks:
+    - name: Atualizar o cache do apt
+      apt:
+        update_cache: yes
+
+    - name: Garantir que o DNS aponta para o Samba AD (Obrigatório para o Join)
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver {{ ip_srv_samba }}
+          nameserver 8.8.8.8
+          search {{ domain_realm | lower }}
+
+    - name: Instalar pacotes para o Samba Membro, SSSD e AWS CLI
+      apt:
+        name:
+          - samba
+          - samba-common-bin
+          - smbclient
+          - realmd
+          - sssd
+          - sssd-tools
+          - libnss-sss
+          - libpam-sss
+          - adcli
+          - packagekit
+          - acl
+          - attr
+          - awscli
+        state: present
+
+    - name: Verificar se a máquina já está no domínio
+      command: realm list
+      register: realm_bound
+      changed_when: false
+
+    - name: Ingressar o servidor de arquivos no domínio Active Directory
+      expect:
+        command: "realm join {{ domain_realm | upper }} -U {{ domain_admin }}"
+        responses:
+          Password for Administrator: "{{ admin_password_secreta }}"
+      when: domain_realm | upper not in realm_bound.stdout
+
+    # Ajustar o SSSD para aceitar nomes curtos de grupos sem o sufixo do domínio
+    - name: Configurar o SSSD para usar nomes curtos e formato padrão do Samba
+      ini_file:
+        path: /etc/sssd/sssd.conf
+        section: "domain/{{ domain_realm | lower }}"
+        option: "use_fully_qualified_names"
+        value: "False"
+
+    # Reiniciar o SSSD logo após a mudança para o Linux carregar as novas regras de grupo
+    - name: Garantir que o SSSD está atualizado e rodando
+      service:
+        name: sssd
+        state: restarted
+        enabled: yes
+
+    - name: Pequena pausa para o SSSD sincronizar com o AD
+      pause:
+        seconds: 5
+
+    # Validar o grupo usando apenas o nome curto "domain users"
+    - name: Criar a pasta dados
+      file:
+        path: /dados
+        state: directory
+        owner: "root"
+        group: "domain users"
+        mode: '0775'
+
+    - name: Configurar o arquivo smb.conf para Servidor Membro
+      blockinfile:
+        path: /etc/samba/smb.conf
+        block: |
+          [global]
+             workgroup = {{ domain_name | upper }}
+             realm = {{ domain_realm | upper }}
+             security = ADS
+             idmap config * : backend = tdb
+             idmap config * : range = 3000-7999
+             idmap config {{ domain_name | upper }} : backend = rid
+             idmap config {{ domain_name | upper }} : range = 10000-999999
+             template shell = /bin/bash
+             template homedir = /home/%U
+
+          [dados]
+             path = /dados
+             read only = no
+             guest ok = no
+             directory mask = 0775
+             create mask = 0775
+      notify: Reiniciar Samba
+
+    - name: Criar o script de backup automatizado para o S3
+      copy:
+        dest: /root/backup_s3.sh
+        mode: '0700'
+        content: |
+          #!/bin/bash
+          DATA=$(date +%Y-%m-%d-%H%M)
+          LOG="/var/log/backup_s3.log"
+          echo "[$DATA] Iniciando backup para o S3..." >> $LOG
+          aws s3 sync /dados/ s3://{{ s3_bucket_name }}/backups/ >> $LOG 2>&1
+          echo "[$DATA] Backup concluído com sucesso." >> $LOG
+
+    - name: Agendar o backup no Cron do sistema (Roda toda madrugada às 02:00)
+      cron:
+        name: "Backup diário para o S3"
+        minute: "0"
+        hour: "2"
+        job: "/bin/bash /root/backup_s3.sh"
+
+  handlers:
+    - name: Reiniciar Samba
+      service:
+        name: smbd
+        state: restarted
+
