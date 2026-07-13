@@ -1,8 +1,3 @@
-# 1. Cria o Bucket S3
-resource "aws_s3_bucket" "bucket_arquivos" {
-  bucket = "acme-arquivos-backup-09072026"
-}
-
 # 1. Criar o Bucket S3 para armazenar os backups
 resource "aws_s3_bucket" "backup_bucket" {
   bucket = "acme-arquivos-backup-09072026"

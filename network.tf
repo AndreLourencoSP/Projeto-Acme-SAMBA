@@ -110,13 +110,37 @@ resource "aws_route_table" "private_route" {
 
 #Grupos de Segurança
 
-resource "aws_security_group" "Acesso_Samba" {
-    name = "SG_SRV_SAMBA"
-    description = "Grupo de Seguranca para o Servidor SAMBA"
+
+resource "aws_security_group" "Acesso_Servidores" {
+    name = "SG_SERVIDORES"
+    description = "Grupo de Seguranca para o Servidores"
     vpc_id = aws_vpc.main.id
 
     #Obs: todas as portas estão sendo liberadas no bloco ["0.0.0.0/0"] para fim de testes de laboratorio, porém o ideal é no lugar colocar o bloco de IP do local
     #onde as estações estão conectadas para acessarem o servidor.
+  ingress {
+    description = "Acesso grafana"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Acesso Prometheus"
+    from_port   = 9090
+    to_port     = 9090
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+   ingress {
+    description = "Acesso grafana"
+    from_port   = 9100
+    to_port     = 9100
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
    ingress {
     description = "Acesso SSH para Ansible e Administracao"
@@ -256,6 +280,7 @@ resource "aws_security_group" "Acesso_Samba" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+
   # --- SAÍDA LIVRE ---
   egress {
     description = "Permitir toda saida para a internet baixar pacotes"
@@ -266,7 +291,7 @@ resource "aws_security_group" "Acesso_Samba" {
   }
 
   tags = {
-    Name = "SG_SRV_SAMBA"
+    Name = "SG_SERVERS"
   }
 }
 

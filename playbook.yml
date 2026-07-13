@@ -1,7 +1,7 @@
 ---
 - name: Configurar Samba como Active Directory Domain Controller (DC)
   hosts: srv_samba
-  become: yes
+  become: true
   vars_files:
     - vars_secretas.yml
 
@@ -107,12 +107,17 @@
         name: samba-ad-dc
         state: restarted
 
-
+# ---------------------------------------------------------
+# Instalar e Configurar o Servidor de Arquivos
+# ---------------------------------------------------------
 
 
 - name: Configurar Servidor de Arquivos Dedicado e Membro do Domínio
   hosts: srv_arquivos
-  become: yes
+  become: true
+  become_user: root
+  become_method: su
+  become_exe: sudo su -
   vars_files:
     - vars_secretas.yml
 
@@ -120,7 +125,7 @@
     domain_name: "acme"
     domain_realm: "ACME.LOCAL"
     domain_admin: "Administrator"
-    ip_srv_samba: "192.168.5.10"
+    ip_srv_samba: "192.168.6.10"
     s3_bucket_name: "acme-arquivos-backup-09072026"
 
   tasks:
@@ -154,16 +159,28 @@
           - awscli
         state: present
 
+    - name: Garantir que o prometheus-node-exporter está instalado
+      apt:
+        name: prometheus-node-exporter
+        state: present
+        update_cache: true
+
+    - name: Garantir que o agente está rodando e habilitado
+      systemd:
+        name: prometheus-node-exporter
+        state: started
+        enabled: true
+
     - name: Verificar se a máquina já está no domínio
       command: realm list
       register: realm_bound
       changed_when: false
 
     - name: Ingressar o servidor de arquivos no domínio Active Directory
-      expect:
+      ansible.builtin.expect:
         command: "realm join {{ domain_realm | upper }} -U {{ domain_admin }}"
         responses:
-          Password for Administrator: "{{ admin_password_secreta }}"
+         (?i)password: "{{ admin_password_secreta }}"
       when: domain_realm | upper not in realm_bound.stdout
 
     # Ajustar o SSSD para aceitar nomes curtos de grupos sem o sufixo do domínio
@@ -242,3 +259,92 @@
         name: smbd
         state: restarted
 
+
+
+
+
+# ---------------------------------------------------------
+# PASSO 1: Configurar os Agentes de Métricas nos Servidores
+# ---------------------------------------------------------
+- name: Instalar Node Exporter nos Servidores de Produção
+  hosts: targets
+  become: true
+  tasks:
+    - name: Garantir que o prometheus-node-exporter está instalado
+      apt:
+        name: prometheus-node-exporter
+        state: present
+        update_cache: true
+
+    - name: Garantir que o agente está rodando e habilitado
+      systemd:
+        name: prometheus-node-exporter
+        state: started
+        enabled: true
+
+# ---------------------------------------------------------
+# Instalar e Configurar o Prometheus e Grafana
+# ---------------------------------------------------------
+- name: Configurar o Servidor de Monitoramento Dedicado
+  hosts: srv_grafana
+  become: true
+  become_user: root
+  become_method: su
+  become_exe: sudo su -
+  tasks:
+    - name: Instalar Prometheus e dependências
+      apt:
+        name: 
+          - prometheus
+          - gpg
+          - software-properties-common
+        state: present
+        update_cache: true
+
+    - name: Adicionar chave GPG do repositório oficial do Grafana
+      apt_key:
+        url: https://apt.grafana.com/gpg.key
+        state: present
+
+    - name: Adicionar repositório estável do Grafana
+      apt_repository:
+        repo: "deb https://apt.grafana.com stable main"
+        state: present
+
+    - name: Instalar o Grafana OSS
+      apt:
+        name: grafana
+        state: present
+        update_cache: true
+
+    - name: Garantir que o Grafana está rodando e habilitado
+      systemd:
+        name: grafana-server
+        state: started
+        enabled: true
+
+    # Configuração do Prometheus para "raspar" as métricas dos servidores
+    - name: Configurar alvos de monitoramento no Prometheus
+      copy:
+        dest: /etc/prometheus/prometheus.yml
+        content: |
+          global:
+            scrape_interval: 15s
+
+          scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+
+            - job_name: 'srv_samba'
+              static_configs:
+                - targets: ['192.168.6.10:9100']  # SRV_SAMBA
+
+            - job_name: 'srv_arquivos'
+              static_configs:
+            - targets: ['192.168.6.20:9100']  # SRV_ARQUIVOS          
+
+    - name: Reiniciar o Prometheus para aplicar as novas rotas/alvos
+      systemd:
+        name: prometheus
+        state: restarted
