@@ -3,8 +3,8 @@
 
     environment {
         // O Terraform reconhece essas variáveis de ambiente automaticamente para autenticar na AWS
-        AWS_ACCESS_KEY_ID     = credentials('AKIA6J6VIITRWND64BMZ')
-        AWS_SECRET_ACCESS_KEY = credentials('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')
+        AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
         AWS_DEFAULT_REGION    = 'us-east-1' // Altere para a região do seu projeto
     }
 
