@@ -9,7 +9,7 @@ filter {
 
 resource "aws_key_pair" "chave_ssh" {
   key_name   = "key-samba" # O nome que vai aparecer no console da AWS
-  public_key = file("~/.ssh/samba-key.pub")
+  public_key = file("~/home/andre/Documentos/Projeto_Acme (Samba)/ssh/samba-key.pub")
 }
 
 resource "aws_instance" "srv_samba" {
